@@ -65,7 +65,7 @@ pub struct PlayerRow {
 /// One row in the ASE-style server table (seed address + live query fields).
 #[derive(Debug, Clone)]
 pub struct GameServer {
-	/// `ip:port` used for UDP status and `+connect`.
+	/// `ip:gameport` used for `+connect` (UDP status may use gameport − 10).
 	pub address: String,
 	pub name: String,
 	pub map: String,

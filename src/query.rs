@@ -2,7 +2,9 @@
 //!
 //! Flow:
 //! 1. [`refresh_live_async`] loads seed addresses from the GitHub mirror
+//!    (game / connect ports)
 //! 2. Each address is queried in parallel with `\xff\xff\xff\xffstatus`
+//!    — try **query port** (game − 10) first, then the game port
 //! 3. Responses are parsed as infostrings + optional player lines
 //! 4. Results are sorted online-first, then by ping / players / name
 //!
@@ -64,7 +66,26 @@ pub fn query_many(addresses: &[String]) -> Vec<GameServer> {
 	out
 }
 
+/// Candidate UDP targets for a mirrored **game** port address.
+///
+/// Kingpin masters/browsers use query port = game − 10 for `status`;
+/// some dedicated builds also answer on the game port. We try query first.
+fn status_targets(game_address: &str) -> Vec<String> {
+	let mut out = Vec::with_capacity(2);
+	if let Some((host, port_s)) = game_address.rsplit_once(':') {
+		if let Ok(port) = port_s.parse::<u16>() {
+			if port >= 10 {
+				out.push(format!("{}:{}", host, port - 10));
+			}
+		}
+	}
+	out.push(game_address.to_string());
+	out
+}
+
 /// Send `status` to one host and parse the reply (or return an offline stub).
+///
+/// `address` is the **game / connect** port from the mirror. Join uses it as-is.
 pub fn query_one(address: &str, timeout: Duration) -> GameServer {
 	let kind = crate::servers::classify_address(address);
 	let fallback = GameServer {
@@ -87,32 +108,35 @@ pub fn query_one(address: &str, timeout: Duration) -> GameServer {
 	let _ = sock.set_read_timeout(Some(timeout));
 	let _ = sock.set_write_timeout(Some(timeout));
 
-	let Ok(mut addrs) = address.to_socket_addrs() else {
-		return fallback;
-	};
-	let Some(dest): Option<SocketAddr> = addrs.next() else {
-		return fallback;
-	};
-
 	let mut packet = Vec::with_capacity(16);
 	packet.extend_from_slice(&OOB);
 	packet.extend_from_slice(b"status");
 
-	let t0 = Instant::now();
-	if sock.send_to(&packet, dest).is_err() {
-		return fallback;
+	for target in status_targets(address) {
+		let Ok(mut addrs) = target.to_socket_addrs() else {
+			continue;
+		};
+		let Some(dest): Option<SocketAddr> = addrs.next() else {
+			continue;
+		};
+
+		let t0 = Instant::now();
+		if sock.send_to(&packet, dest).is_err() {
+			continue;
+		}
+
+		let mut buf = [0u8; 16_384];
+		let Ok((n, _)) = sock.recv_from(&mut buf) else {
+			continue;
+		};
+		let ping_ms = t0.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+
+		if let Some(server) = parse_status_response(address, kind, ping_ms, &buf[..n]) {
+			return server;
+		}
 	}
 
-	let mut buf = [0u8; 16_384];
-	let Ok((n, _)) = sock.recv_from(&mut buf) else {
-		return fallback;
-	};
-	let ping_ms = t0.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-
-	match parse_status_response(address, kind, ping_ms, &buf[..n]) {
-		Some(server) => server,
-		None => fallback,
-	}
+	fallback
 }
 
 /// Parse a Quake 2 `print\n\\key\\value...` status payload into a [`GameServer`].
@@ -256,5 +280,16 @@ mod tests {
 		assert_eq!(s.players, 2);
 		assert_eq!(s.player_rows[0].name, "PlayerOne");
 		assert_eq!(s.ping_ms, Some(40));
+	}
+
+	#[test]
+	fn status_targets_prefer_query_port() {
+		assert_eq!(
+			status_targets("203.212.17.27:31211"),
+			vec![
+				"203.212.17.27:31201".to_string(),
+				"203.212.17.27:31211".to_string(),
+			]
+		);
 	}
 }
