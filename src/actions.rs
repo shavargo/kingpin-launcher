@@ -54,10 +54,11 @@ pub fn join_server(game_dir: &Path, address: &str, game: &str) -> Result<(), Str
 	spawn(&exe, game_dir, &args)
 }
 
-/// Map server `game` / `gamename` infostring values to a local folder name.
+/// Map server `game` / `gamedir` infostring values to a local folder name.
 ///
-/// Servers often report long display names (`"Hitmen Mod"`); we take the first
-/// token and sanitize. Known aliases (`kingpin`, `baseq2`, …) map to `main`.
+/// Pass the real client folder (`game`/`gamedir`), not display `gamename`.
+/// Long names (`"Hitmen Mod"`) take the first token. Known aliases and
+/// server-only packs (Botmatch, Monkey) map to `main`.
 pub fn normalize_game_dir(raw: &str) -> String {
 	let s = raw.trim();
 	if s.is_empty() {
@@ -78,8 +79,10 @@ pub fn normalize_game_dir(raw: &str) -> String {
 	{
 		return "main".into();
 	}
-	match token.to_ascii_lowercase().as_str() {
+	let lower = token.to_ascii_lowercase();
+	match lower.as_str() {
 		"baseq2" | "kingpin" | "kp" => "main".into(),
+		other if other.starts_with("botmatch") || other.starts_with("monkey") => "main".into(),
 		other => other.to_string(),
 	}
 }
@@ -145,5 +148,8 @@ mod tests {
 		assert_eq!(normalize_game_dir("CTF"), "ctf");
 		assert_eq!(normalize_game_dir("kingpin"), "main");
 		assert_eq!(normalize_game_dir("Hitmen Mod"), "hitmen");
+		assert_eq!(normalize_game_dir("Botmatch.v37"), "main");
+		assert_eq!(normalize_game_dir("botmatch.v39.5"), "main");
+		assert_eq!(normalize_game_dir("Monkey Mod"), "main");
 	}
 }

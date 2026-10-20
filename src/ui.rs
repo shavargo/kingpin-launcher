@@ -808,6 +808,7 @@ impl KingpinLauncherApp {
                 }
                 s.name.to_ascii_lowercase().contains(&q)
                     || s.map.to_ascii_lowercase().contains(&q)
+                    || s.game_label().to_ascii_lowercase().contains(&q)
                     || s.game.to_ascii_lowercase().contains(&q)
                     || s.address.to_ascii_lowercase().contains(&q)
             })
@@ -822,7 +823,10 @@ impl KingpinLauncherApp {
                 SortCol::Players => a.players.cmp(&b.players),
                 SortCol::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 SortCol::Map => a.map.to_lowercase().cmp(&b.map.to_lowercase()),
-                SortCol::Game => a.game.to_lowercase().cmp(&b.game.to_lowercase()),
+                SortCol::Game => a
+                    .game_label()
+                    .to_lowercase()
+                    .cmp(&b.game_label().to_lowercase()),
                 SortCol::Address => a.address.cmp(&b.address),
             };
             if self.sort_asc {
@@ -1036,12 +1040,8 @@ impl KingpinLauncherApp {
                                         ui.label(&server.map);
                                     });
                                     row.col(|ui| {
-                                        let game = if server.game.is_empty() {
-                                            "—"
-                                        } else {
-                                            server.game.as_str()
-                                        };
-                                        ui.label(game);
+                                        let game = server.game_label();
+                                        ui.label(if game.is_empty() { "—" } else { game });
                                     });
                                     row.col(|ui| {
                                         ui.label(
@@ -1198,10 +1198,13 @@ impl KingpinLauncherApp {
                                             } else {
                                                 &server.map
                                             },
-                                            if server.game.is_empty() {
-                                                "—"
-                                            } else {
-                                                &server.game
+                                            {
+                                                let g = server.game_label();
+                                                if g.is_empty() {
+                                                    "—"
+                                                } else {
+                                                    g
+                                                }
                                             },
                                         ));
                                         ui.add_space(4.0);

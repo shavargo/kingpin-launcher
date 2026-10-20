@@ -75,7 +75,7 @@ pub struct GameServer {
 	pub ping_ms: Option<u32>,
 	pub kind: ServerKind,
 	pub online: bool,
-	/// Mod / game folder hint from the infostring (`gamename` / `game`).
+	/// Client mod folder for `+set game` (`game` / `gamedir`; empty = main).
 	pub game: String,
 	/// Full `\key\value` rules from the status response (Server Info pane).
 	pub rules: BTreeMap<String, String>,
@@ -83,6 +83,21 @@ pub struct GameServer {
 }
 
 impl GameServer {
+	/// Display name for the Game column (`gamename`, else client folder).
+	pub fn game_label(&self) -> &str {
+		if let Some(name) = self.rules.get("gamename") {
+			let name = name.trim();
+			if !name.is_empty() {
+				return name;
+			}
+		}
+		if self.game.is_empty() {
+			""
+		} else {
+			self.game.as_str()
+		}
+	}
+
 	pub fn players_label(&self) -> String {
 		if self.max_players > 0 {
 			format!("{}/{}", self.players, self.max_players)

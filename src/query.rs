@@ -175,9 +175,12 @@ pub fn parse_status_response(
 			.and_then(|v| v.parse().ok())
 			.unwrap_or(player_rows.len() as u32)
 	};
+	// Client folder for `+set game` — prefer real `game`/`gamedir`.
+	// `gamename` is a display string (e.g. Botmatch.v37) and is often
+	// server-only; clients still run `main`. Shown via `GameServer::game_label`.
 	let game = rules
-		.get("gamename")
-		.or_else(|| rules.get("game"))
+		.get("game")
+		.or_else(|| rules.get("gamedir"))
 		.cloned()
 		.unwrap_or_default();
 
