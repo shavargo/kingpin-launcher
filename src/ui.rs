@@ -693,12 +693,14 @@ impl eframe::App for KingpinLauncherApp {
                     });
 
                     // Content stage to the right of nav (mockup teal pane zone).
+                    // Leave a bottom strip so Browser JOIN can hang past the pane without
+                    // clipping against the borderless window edge.
                     let content_rect = egui::Rect::from_min_max(
                         egui::pos2(
                             full.left() + nav_w + full.width() * 0.045,
                             full.top() + logo_h + 18.0,
                         ),
-                        egui::pos2(full.right() - full.width() * 0.025, full.bottom() - 16.0),
+                        egui::pos2(full.right() - full.width() * 0.04, full.bottom() - 10.0),
                     );
                     ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
                         ui.set_min_size(content_rect.size());
@@ -1022,115 +1024,132 @@ impl KingpinLauncherApp {
         let online_n = list.iter().filter(|s| s.online).count();
         let players_n: u32 = list.iter().map(|s| s.players).sum();
 
-        // Leave room so JOIN can sit on the pane's bottom-right corner (mockup overlap).
-        let list_h = (ui.available_height() - 36.0).max(220.0);
+        // Reserve a bottom strip so JOIN can hang past the teal pane (mockup overlap)
+        // without being clipped by the borderless window edge.
+        let join_size = egui::vec2(248.0, 86.0);
+        let join_overhang_y = 32.0_f32;
+        let join_overhang_x = 22.0_f32;
+        let list_h = (ui.available_height() - join_overhang_y - 4.0).max(220.0);
         let row_h = 30.0;
         let mut join_addr: Option<String> = None;
         let mut select_addr: Option<String> = None;
         let mut sort_click: Option<SortCol> = None;
 
-        let pane = theme::teal_pane(ui, |ui| {
-            ui.set_min_height(list_h);
-            let teal = theme::teal();
-            TableBuilder::new(ui)
-                .striped(false)
-                .sense(egui::Sense::click())
-                .cell_layout(Layout::left_to_right(Align::Center))
-                .column(Column::remainder().at_least(180.0))
-                .column(Column::exact(70.0))
-                .column(Column::exact(80.0))
-                .column(Column::initial(140.0).at_least(90.0).clip(true))
-                .min_scrolled_height(list_h - 28.0)
-                .max_scroll_height(list_h - 28.0)
-                .header(28.0, |mut header| {
-                    for (label, col) in [
-                        ("NAME", SortCol::Name),
-                        ("PING", SortCol::Ping),
-                        ("PLAYERS", SortCol::Players),
-                        ("MAP", SortCol::Map),
-                    ] {
-                        header.col(|ui| {
-                            let mark = if self.sort_col == col {
-                                if self.sort_asc {
-                                    " ▲"
-                                } else {
-                                    " ▼"
+        // Cap pane height so the JOIN overhang strip stays empty for foreground paint.
+        let pane = ui
+            .allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), list_h),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    theme::teal_pane(ui, |ui| {
+                        ui.set_min_height(list_h - 8.0);
+                        let teal = theme::teal();
+                        // Bright teal column headers (mockup).
+                        let header_teal = Color32::from_rgb(110, 245, 235);
+                        TableBuilder::new(ui)
+                            .striped(false)
+                            .sense(egui::Sense::click())
+                            .cell_layout(Layout::left_to_right(Align::Center))
+                            .column(Column::remainder().at_least(180.0))
+                            .column(Column::exact(70.0))
+                            .column(Column::exact(80.0))
+                            .column(Column::initial(140.0).at_least(90.0).clip(true))
+                            .min_scrolled_height(list_h - 36.0)
+                            .max_scroll_height(list_h - 36.0)
+                            .header(28.0, |mut header| {
+                                for (label, col) in [
+                                    ("NAME", SortCol::Name),
+                                    ("PING", SortCol::Ping),
+                                    ("PLAYERS", SortCol::Players),
+                                    ("MAP", SortCol::Map),
+                                ] {
+                                    header.col(|ui| {
+                                        let mark = if self.sort_col == col {
+                                            if self.sort_asc {
+                                                " ▲"
+                                            } else {
+                                                " ▼"
+                                            }
+                                        } else {
+                                            ""
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new(format!("{label}{mark}"))
+                                                        .strong()
+                                                        .size(15.0)
+                                                        .color(header_teal),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            )
+                                            .clicked()
+                                        {
+                                            sort_click = Some(col);
+                                        }
+                                    });
                                 }
-                            } else {
-                                ""
-                            };
-                            if ui
-                                .add(
-                                    egui::Label::new(
-                                        RichText::new(format!("{label}{mark}"))
-                                            .strong()
-                                            .size(15.0)
-                                            .color(Color32::from_rgb(90, 235, 225)),
-                                    )
-                                    .sense(egui::Sense::click()),
-                                )
-                                .clicked()
-                            {
-                                sort_click = Some(col);
-                            }
-                        });
-                    }
-                })
-                .body(|mut body| {
-                    for server in &list {
-                        let selected =
-                            self.selected_address.as_deref() == Some(&server.address);
-                        let ping_color =
-                            theme::ase_ping_color(server.online, server.ping_ms);
-                        let addr = server.address.clone();
-                        let name_color = if selected {
-                            theme::amber()
-                        } else if server.online {
-                            teal
-                        } else {
-                            theme::muted()
-                        };
-
-                        body.row(row_h, |mut row| {
-                            row.set_selected(selected);
-                            row.col(|ui| {
-                                ui.label(RichText::new(&server.name).color(name_color));
-                            });
-                            row.col(|ui| {
-                                ui.label(
-                                    RichText::new(server.ping_label())
-                                        .monospace()
-                                        .color(ping_color),
-                                );
-                            });
-                            row.col(|ui| {
-                                ui.label(
-                                    RichText::new(server.players_label())
-                                        .monospace()
-                                        .color(teal),
-                                );
-                            });
-                            row.col(|ui| {
-                                ui.label(
-                                    RichText::new(if server.map.is_empty() {
-                                        "—"
+                            })
+                            .body(|mut body| {
+                                for server in &list {
+                                    let selected = self.selected_address.as_deref()
+                                        == Some(&server.address);
+                                    let ping_color =
+                                        theme::ase_ping_color(server.online, server.ping_ms);
+                                    let addr = server.address.clone();
+                                    let name_color = if selected {
+                                        theme::amber()
+                                    } else if server.online {
+                                        teal
                                     } else {
-                                        server.map.as_str()
-                                    })
-                                    .color(teal),
-                                );
+                                        theme::muted()
+                                    };
+
+                                    body.row(row_h, |mut row| {
+                                        row.set_selected(selected);
+                                        row.col(|ui| {
+                                            ui.label(
+                                                RichText::new(&server.name).color(name_color),
+                                            );
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(
+                                                RichText::new(server.ping_label())
+                                                    .monospace()
+                                                    .color(ping_color),
+                                            );
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(
+                                                RichText::new(server.players_label())
+                                                    .monospace()
+                                                    .color(teal),
+                                            );
+                                        });
+                                        row.col(|ui| {
+                                            ui.label(
+                                                RichText::new(if server.map.is_empty() {
+                                                    "—"
+                                                } else {
+                                                    server.map.as_str()
+                                                })
+                                                .color(teal),
+                                            );
+                                        });
+                                        let resp = row.response();
+                                        if resp.clicked() {
+                                            select_addr = Some(addr.clone());
+                                        }
+                                        if resp.double_clicked() {
+                                            join_addr = Some(addr);
+                                        }
+                                    });
+                                }
                             });
-                            let resp = row.response();
-                            if resp.clicked() {
-                                select_addr = Some(addr.clone());
-                            }
-                            if resp.double_clicked() {
-                                join_addr = Some(addr);
-                            }
-                        });
-                    }
-                });
-        });
+                    })
+                },
+            )
+            .inner;
         pane.context_menu(|ui| {
             ui.label(RichText::new("FILTERS").color(theme::amber()).strong());
             ui.add(egui::TextEdit::singleline(&mut self.server_search).hint_text("search"));
@@ -1153,16 +1172,29 @@ impl KingpinLauncherApp {
             self.join_selected();
         }
 
-        // JOIN overlaps the teal pane's bottom-right corner (mockup) — painted in update().
+        // JOIN sits on the foreground overlapping the teal pane's bottom-right corner.
         let pane_r = pane.rect;
-        let join_size = egui::vec2(230.0, 68.0);
-        let join_rect = egui::Rect::from_min_size(
+        let screen = ui.ctx().screen_rect();
+        let mut join_rect = egui::Rect::from_min_size(
             egui::pos2(
-                pane_r.right() - join_size.x + 12.0,
-                pane_r.bottom() - join_size.y * 0.55,
+                pane_r.right() - join_size.x + join_overhang_x,
+                pane_r.bottom() - join_size.y + join_overhang_y,
             ),
             join_size,
         );
+        // Keep the full plate inside the borderless window.
+        if join_rect.right() > screen.right() - 8.0 {
+            join_rect = join_rect.translate(egui::vec2(
+                (screen.right() - 8.0) - join_rect.right(),
+                0.0,
+            ));
+        }
+        if join_rect.bottom() > screen.bottom() - 6.0 {
+            join_rect = join_rect.translate(egui::vec2(
+                0.0,
+                (screen.bottom() - 6.0) - join_rect.bottom(),
+            ));
+        }
         let can_join = self.checklist.kingpin_exe == ItemStatus::Ok
             && self
                 .selected_address

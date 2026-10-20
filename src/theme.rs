@@ -117,7 +117,12 @@ pub fn apply(ctx: &egui::Context) {
     let _ = join_tex(ctx);
 }
 
-fn decode(ctx: &egui::Context, id: &'static str, bytes: &[u8], punch_black: bool) -> TextureHandle {
+fn decode(
+    ctx: &egui::Context,
+    id: &'static str,
+    bytes: &[u8],
+    punch_luma_below: Option<u16>,
+) -> TextureHandle {
     let key = Id::new(id);
     if let Some(t) = ctx.data(|d| d.get_temp::<TextureHandle>(key)) {
         return t;
@@ -125,9 +130,10 @@ fn decode(ctx: &egui::Context, id: &'static str, bytes: &[u8], punch_black: bool
     let rgba = image::load_from_memory(bytes).unwrap().to_rgba8();
     let (w, h) = (rgba.width() as usize, rgba.height() as usize);
     let mut raw = rgba.into_raw();
-    if punch_black {
+    if let Some(thresh) = punch_luma_below {
         for px in raw.chunks_exact_mut(4) {
-            if (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3 < 12 {
+            let luma = (px[0] as u16 + px[1] as u16 + px[2] as u16) / 3;
+            if luma < thresh {
                 px[3] = 0;
             }
         }
@@ -139,16 +145,18 @@ fn decode(ctx: &egui::Context, id: &'static str, bytes: &[u8], punch_black: bool
 }
 
 fn alley_tex(ctx: &egui::Context) -> TextureHandle {
-    decode(ctx, "chrome_alley", ALLEY, false)
+    decode(ctx, "chrome_alley", ALLEY, None)
 }
 fn logo_tex(ctx: &egui::Context) -> TextureHandle {
-    decode(ctx, "chrome_logo", LOGO, true)
+    // Punch near-black so only distressed letterforms remain (no rain/lamp box).
+    decode(ctx, "chrome_logo", LOGO, Some(18))
 }
 fn btn_idle_tex(ctx: &egui::Context) -> TextureHandle {
-    decode(ctx, "chrome_btn_idle", BTN_IDLE, false)
+    decode(ctx, "chrome_btn_idle", BTN_IDLE, None)
 }
 fn join_tex(ctx: &egui::Context) -> TextureHandle {
-    decode(ctx, "chrome_join", JOIN, false)
+    // Key out residual black matte around the blood plate (baked JOIN label stays).
+    decode(ctx, "chrome_join", JOIN, Some(14))
 }
 
 pub fn paint_backdrop(ctx: &egui::Context) {
@@ -241,11 +249,19 @@ pub fn rivet_nav_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui:
     }
 
     if selected {
-        painter.rect_stroke(
-            rect.expand(3.0),
-            CornerRadius::same(4),
-            Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(255, 176, 48, 90)),
-            egui::StrokeKind::Outside,
+        // Amber selected glow — soft bloom then hard rim (mockup).
+        for (expand, a) in [(8.0_f32, 28u8), (5.0, 55), (2.0, 110)] {
+            painter.rect_stroke(
+                rect.expand(expand),
+                CornerRadius::same(5),
+                Stroke::new(2.5_f32, Color32::from_rgba_unmultiplied(255, 176, 48, a)),
+                egui::StrokeKind::Outside,
+            );
+        }
+        painter.rect_filled(
+            rect.shrink(6.0),
+            CornerRadius::same(2),
+            Color32::from_rgba_unmultiplied(255, 160, 40, 18),
         );
     }
 
@@ -268,8 +284,8 @@ pub fn rivet_nav_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui:
 
 pub fn teal_pane(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     let r = ui.available_rect_before_wrap();
-    // Soft outer bloom onto wet alley (mockup cyan puddle glow).
-    for (expand, a) in [(16.0_f32, 16u8), (9.0, 28), (4.0, 48)] {
+    // Soft outer bloom onto wet alley (mockup cyan puddle glow) — keep light so cobbles read.
+    for (expand, a) in [(14.0_f32, 10u8), (8.0, 18), (3.0, 32)] {
         ui.painter().rect_filled(
             r.expand(expand),
             6.0,
@@ -277,9 +293,9 @@ pub fn teal_pane(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) ->
         );
     }
     egui::Frame::new()
-        // Glass teal — alley cobbles must read through (mockup).
-        .fill(Color32::from_rgba_unmultiplied(0, 42, 48, 88))
-        .stroke(Stroke::new(2.5_f32, TEAL))
+        // Glass teal — alley cobbles must show through (lower fill alpha than earlier builds).
+        .fill(Color32::from_rgba_unmultiplied(0, 55, 58, 48))
+        .stroke(Stroke::new(2.0_f32, TEAL))
         .corner_radius(CornerRadius::same(5))
         .inner_margin(Margin::symmetric(16, 12))
         .show(ui, add_contents)
@@ -287,7 +303,8 @@ pub fn teal_pane(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) ->
 }
 
 pub fn join_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-    let size = egui::vec2(230.0, 68.0);
+    // Asset is 245×85 — keep that aspect so the baked JOIN plate is not squashed.
+    let size = egui::vec2(248.0, 86.0);
     let sense = if enabled {
         egui::Sense::click()
     } else {
