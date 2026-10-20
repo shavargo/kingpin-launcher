@@ -1,6 +1,6 @@
 [package]
 name = "kingpin-launcher"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Noir GUI launcher for Kingpin: Life of Crime"
 license = "MIT"
