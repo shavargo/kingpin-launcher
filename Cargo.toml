@@ -9,7 +9,7 @@ license = "MIT"
 eframe = { version = "0.31", default-features = true, features = ["default_fonts"] }
 egui = "0.31"
 egui_extras = { version = "0.31", default-features = false, features = ["image"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tga"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

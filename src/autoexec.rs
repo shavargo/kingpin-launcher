@@ -128,6 +128,11 @@ pub const SHARED_CVARS: &[&str] = &[
     "cl_adjustfov",
     "gl_maxtexsize",
     "r_maxfps",
+    "name",
+    "skin",
+    "extras",
+    "gender",
+    "gender_auto",
 ];
 
 pub struct ApplyAllResult {

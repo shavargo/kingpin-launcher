@@ -8,6 +8,7 @@
 //! | Play | [`crate::actions::launch_single_player`] |
 //! | Browser | [`crate::servers`] + [`crate::query`] (async refresh) |
 //! | Mods | [`crate::mods`] catalog / install jobs |
+//! | Player | [`crate::skins`] + [`crate::autoexec`] (skin / name / extras) |
 //! | Controls | [`crate::autoexec`] |
 //! | Patches | [`crate::checklist`] + [`crate::wizard`] + [`crate::addons`] |
 //!
@@ -25,10 +26,12 @@ use crate::detect::{self, is_kingpin_dir};
 use crate::mods::{self, ModsEvent, RemoteMod};
 use crate::query;
 use crate::servers::{self, GameServer, ServerKind};
+use crate::skins::{self, SkinSelection};
 use crate::theme;
 use crate::wizard::{self, WizardStep};
-use eframe::egui::{self, Align, Color32, Event, Layout, RichText, TextStyle};
+use eframe::egui::{self, Align, Color32, Event, Layout, RichText, TextStyle, TextureHandle};
 use egui_extras::{Column, TableBuilder};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -39,6 +42,7 @@ pub enum Tab {
     Play,
     Browser,
     Mods,
+    Player,
     Controls,
     Patches,
 }
@@ -49,6 +53,7 @@ impl Tab {
             Self::Play => "play",
             Self::Browser => "browser",
             Self::Mods => "mods",
+            Self::Player => "player",
             Self::Controls => "controls",
             Self::Patches => "patches",
         }
@@ -58,6 +63,7 @@ impl Tab {
         match s {
             "browser" => Self::Browser,
             "mods" => Self::Mods,
+            "player" => Self::Player,
             "controls" => Self::Controls,
             "patches" => Self::Patches,
             _ => Self::Play,
@@ -66,10 +72,11 @@ impl Tab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Play => "PLAY",
-            Self::Browser => "BROWSER",
-            Self::Mods => "MODS",
-            Self::Controls => "CONTROLS",
+            Self::Play => "SINGLE PLAYER",
+            Self::Browser => "SERVER BROWSER",
+            Self::Mods => "MULTIPLAYER",
+            Self::Player => "PLAYER",
+            Self::Controls => "OPTIONS",
             Self::Patches => "PATCHES",
         }
     }
@@ -141,7 +148,7 @@ pub struct KingpinLauncherApp {
     mods_filter: ModsFilter,
     mods_rx: Option<mpsc::Receiver<ModsEvent>>,
     installing_mod: Option<String>,
-    // --- Controls tab ---
+    // --- Controls / Player tabs (shared autoexec.cfg) ---
     controls_game: String,
     controls_text: String,
     controls_dirty: bool,
@@ -149,6 +156,17 @@ pub struct KingpinLauncherApp {
     /// When set, the next key/mouse event rebinds this command.
     controls_listening: Option<String>,
     controls_show_raw: bool,
+    // --- Player tab ---
+    player_models: Vec<String>,
+    player_model_filter: String,
+    player_sel: SkinSelection,
+    player_name: String,
+    player_extras: String,
+    player_gender: String,
+    player_tex: HashMap<String, TextureHandle>,
+    player_tex_error: HashMap<String, String>,
+    /// Browser JOIN CTA painted on the foreground layer (avoids pane clip).
+    join_cta: Option<(egui::Rect, bool)>,
 }
 
 impl KingpinLauncherApp {
@@ -212,6 +230,20 @@ impl KingpinLauncherApp {
             controls_loaded_for: None,
             controls_listening: None,
             controls_show_raw: false,
+            player_models: Vec::new(),
+            player_model_filter: String::new(),
+            player_sel: SkinSelection {
+                model: "male_thug".into(),
+                head: "001".into(),
+                body: "001".into(),
+                legs: "001".into(),
+            },
+            player_name: "Player".into(),
+            player_extras: "0000".into(),
+            player_gender: "male".into(),
+            player_tex: HashMap::new(),
+            player_tex_error: HashMap::new(),
+            join_cta: None,
         };
         // Always check the mirror list on launch (body download only if SHA/ETag changed).
         std::thread::spawn(|| crate::servers::sync_list_cache());
@@ -221,8 +253,11 @@ impl KingpinLauncherApp {
         if app.tab == Tab::Mods {
             app.start_mods_catalog();
         }
-        if app.tab == Tab::Controls {
+        if app.tab == Tab::Controls || app.tab == Tab::Player {
             app.load_controls();
+            if app.tab == Tab::Player {
+                app.sync_player_from_autoexec();
+            }
         }
         app
     }
@@ -591,159 +626,284 @@ impl eframe::App for KingpinLauncherApp {
             self.start_server_refresh();
         }
 
-        theme::paint_brick_backdrop(ctx);
+        theme::paint_backdrop(ctx);
+        self.join_cta = None;
 
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Image::new(egui::include_image!("../assets/kingpin_logo.png"))
-                        .fit_to_exact_size(egui::vec2(280.0, 72.0))
-                        .maintain_aspect_ratio(true),
-                );
-                ui.add_space(12.0);
-                ui.with_layout(Layout::left_to_right(Align::BOTTOM), |ui| {
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("LAUNCHER")
-                            .color(Color32::from_rgb(160, 150, 130))
-                            .size(14.0),
-                    );
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .button(RichText::new("Discord").color(theme::yellow()))
-                        .on_hover_text(actions::DISCORD_URL)
-                        .clicked()
-                    {
-                        match actions::open_discord() {
-                            Ok(()) => self.set_ok("Opened Discord invite."),
-                            Err(e) => self.set_err(e),
-                        }
-                    }
-                });
-            });
-            ui.add_space(4.0);
-            ui.separator();
-        });
-
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.add_space(4.0);
-            let ready = self.checklist.is_ready();
-            let label = self.checklist.status_label();
-            let color = if ready {
-                theme::ready_green()
-            } else {
-                theme::yellow()
-            };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(label).color(color).strong());
-                if let Some(dir) = &self.checklist.game_dir {
-                    ui.label(
-                        RichText::new(shorten_path(dir, 56))
-                            .color(Color32::from_rgb(120, 110, 95))
-                            .small(),
-                    );
-                }
-            });
-            if !self.status_message.is_empty() {
-                let c = if self.status_is_error {
-                    theme::blood()
-                } else {
-                    Color32::from_rgb(180, 170, 150)
-                };
-                ui.label(RichText::new(&self.status_message).color(c));
-            }
-            ui.add_space(4.0);
-        });
-
-        egui::SidePanel::left("nav")
-            .resizable(false)
-            .exact_width(140.0)
+        // Single transparent stage — alley is the hero (mockup layout).
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin::ZERO))
             .show(ctx, |ui| {
-                ui.add_space(12.0);
-                for tab in [Tab::Play, Tab::Browser, Tab::Mods, Tab::Controls, Tab::Patches] {
-                    let selected = self.tab == tab;
-                    let text = if selected {
-                        RichText::new(tab.label()).color(theme::yellow()).strong()
-                    } else {
-                        RichText::new(tab.label()).color(Color32::from_rgb(200, 190, 170))
-                    };
-                    if ui
-                        .add_sized([120.0, 36.0], egui::SelectableLabel::new(selected, text))
-                        .clicked()
-                    {
-                        self.tab = tab;
-                        self.config.last_tab = Some(tab.as_str().into());
-                        let _ = self.config.save();
-                        if tab == Tab::Browser && !self.servers_loaded && !self.busy {
-                            self.start_server_refresh();
+                let full = ui.max_rect();
+
+                // Borderless window: drag from the top strip / logo band.
+                let drag_h = 48.0_f32;
+                let drag_rect = egui::Rect::from_min_size(
+                    full.min,
+                    egui::vec2(full.width() - 44.0, drag_h),
+                );
+                let drag = ui.interact(
+                    drag_rect,
+                    egui::Id::new("title_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                if drag.dragged() {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                ui.scope_builder(egui::UiBuilder::new().max_rect(full), |ui| {
+                    // Centered distressed KINGPIN logo (mockup proportions).
+                    let logo_w = (full.width() * 0.48).clamp(420.0, 600.0);
+                    let logo_h = logo_w * 0.20;
+                    let logo_rect = egui::Rect::from_center_size(
+                        egui::pos2(full.center().x, full.top() + logo_h * 0.58 + 6.0),
+                        egui::vec2(logo_w, logo_h),
+                    );
+                    theme::paint_logo(ui, logo_rect);
+
+                    // Left riveted nav — mockup order: 4 destinations + QUIT.
+                    let nav_w = (full.width() * 0.20).clamp(220.0, 270.0);
+                    let nav_top = full.top() + logo_h + 28.0;
+                    let nav_rect = egui::Rect::from_min_size(
+                        egui::pos2(full.left() + full.width() * 0.035, nav_top),
+                        egui::vec2(nav_w, full.height() - (nav_top - full.top()) - 36.0),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(nav_rect), |ui| {
+                        ui.set_min_size(nav_rect.size());
+                        // Match mockup: SINGLE PLAYER / MULTIPLAYER / SERVER BROWSER / OPTIONS / QUIT
+                        let options_selected = matches!(
+                            self.tab,
+                            Tab::Controls | Tab::Player | Tab::Patches
+                        );
+                        for (tab, selected) in [
+                            (Tab::Play, self.tab == Tab::Play),
+                            (Tab::Mods, self.tab == Tab::Mods),
+                            (Tab::Browser, self.tab == Tab::Browser),
+                            (Tab::Controls, options_selected),
+                        ] {
+                            if theme::rivet_nav_button(ui, tab.label(), selected).clicked() {
+                                self.select_tab(tab);
+                            }
+                            ui.add_space(10.0);
                         }
-                        if tab == Tab::Mods && !self.mods_loaded && !self.mods_busy {
-                            self.start_mods_catalog();
+                        ui.add_space(14.0);
+                        if theme::rivet_nav_button(ui, "QUIT", false).clicked() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                        if tab == Tab::Controls {
-                            self.ensure_controls_loaded();
+                    });
+
+                    // Content stage to the right of nav (mockup teal pane zone).
+                    let content_rect = egui::Rect::from_min_max(
+                        egui::pos2(
+                            full.left() + nav_w + full.width() * 0.045,
+                            full.top() + logo_h + 18.0,
+                        ),
+                        egui::pos2(full.right() - full.width() * 0.025, full.bottom() - 16.0),
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                        ui.set_min_size(content_rect.size());
+                        match self.tab {
+                            Tab::Play => self.ui_play(ui),
+                            Tab::Browser => self.ui_browser(ui),
+                            Tab::Mods => self.ui_mods(ui),
+                            Tab::Controls | Tab::Player | Tab::Patches => {
+                                self.ui_options_shell(ui);
+                            }
                         }
+                    });
+
+                    // Status only on errors — mockup has a clean stage.
+                    if self.status_is_error && !self.status_message.is_empty() {
+                        ui.painter().text(
+                            egui::pos2(full.left() + 36.0, full.bottom() - 18.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            &self.status_message,
+                            egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                            theme::blood(),
+                        );
                     }
-                    ui.add_space(4.0);
+                });
+
+                // JOIN sits on the foreground layer so the teal pane never clips it.
+                if let Some((join_rect, can_join)) = self.join_cta {
+                    let join_id = egui::Id::new("join_cta_fg");
+                    let resp = ui.interact(
+                        join_rect,
+                        join_id,
+                        if can_join {
+                            egui::Sense::click()
+                        } else {
+                            egui::Sense::hover()
+                        },
+                    );
+                    let fg = ui.ctx().layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        egui::Id::new("join_cta_layer"),
+                    ));
+                    theme::paint_join_plate(
+                        &fg,
+                        join_rect,
+                        "JOIN",
+                        can_join,
+                        resp.hovered(),
+                    );
+                    if resp.clicked() {
+                        self.join_selected();
+                    }
                 }
             });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(8.0);
-            match self.tab {
-                Tab::Play => self.ui_play(ui),
-                Tab::Browser => self.ui_browser(ui),
-                Tab::Mods => self.ui_mods(ui),
-                Tab::Controls => self.ui_controls(ui),
-                Tab::Patches => self.ui_patches(ui),
-            }
-        });
     }
 }
 
 impl KingpinLauncherApp {
-    fn ui_play(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            RichText::new("Single Player")
-                .size(22.0)
-                .color(theme::yellow()),
-        );
-        ui.label("Launch Kingpin directly into the campaign / local game.");
-        ui.add_space(16.0);
-
-        let enabled = self.checklist.kingpin_exe == ItemStatus::Ok && !self.busy;
-        if ui
-            .add_enabled(
-                enabled,
-                egui::Button::new(RichText::new("  PLAY SINGLE PLAYER  ").size(18.0).strong())
-                    .fill(theme::blood())
-                    .min_size(egui::vec2(260.0, 48.0)),
-            )
-            .clicked()
-        {
-            if let Some(dir) = self.config.game_dir() {
-                match actions::launch_single_player(&dir) {
-                    Ok(()) => self.set_ok("Started kingpin.exe"),
-                    Err(e) => {
-                        self.set_err(e);
-                        self.tab = Tab::Patches;
-                    }
+    fn select_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.config.last_tab = Some(tab.as_str().into());
+        let _ = self.config.save();
+        if tab == Tab::Browser && !self.servers_loaded && !self.busy {
+            self.start_server_refresh();
+        }
+        if tab == Tab::Mods && !self.mods_loaded && !self.mods_busy {
+            self.start_mods_catalog();
+        }
+        if matches!(tab, Tab::Controls | Tab::Player | Tab::Patches) {
+            self.ensure_controls_loaded();
+            if tab == Tab::Player || tab == Tab::Controls {
+                // Keep player fields warm when entering Options.
+                if self.tab == Tab::Player {
+                    self.sync_player_from_autoexec();
                 }
-            } else {
-                self.set_err("No game folder — open Patches.");
-                self.tab = Tab::Patches;
             }
         }
+    }
 
-        if self.checklist.kingpin_exe != ItemStatus::Ok {
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new("kingpin.exe missing. Use Patches to locate the install.")
-                    .color(theme::yellow()),
-            );
+    /// OPTIONS groups Controls / Player / Patches (mockup has one Options plate).
+    fn ui_options_shell(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            for (tab, label) in [
+                (Tab::Controls, "CONTROLS"),
+                (Tab::Player, "PLAYER"),
+                (Tab::Patches, "PATCHES"),
+            ] {
+                let on = self.tab == tab;
+                let text = if on {
+                    RichText::new(label).color(theme::amber()).strong()
+                } else {
+                    RichText::new(label).color(theme::muted())
+                };
+                if ui
+                    .add(
+                        egui::Button::new(text)
+                            .fill(if on {
+                                Color32::from_rgba_unmultiplied(40, 30, 18, 200)
+                            } else {
+                                Color32::from_rgba_unmultiplied(10, 12, 14, 160)
+                            })
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                if on {
+                                    theme::amber()
+                                } else {
+                                    theme::teal_dim()
+                                },
+                            )),
+                    )
+                    .clicked()
+                {
+                    self.select_tab(tab);
+                    if tab == Tab::Player {
+                        self.sync_player_from_autoexec();
+                    }
+                }
+            }
+        });
+        ui.add_space(10.0);
+        match self.tab {
+            Tab::Player => self.ui_player(ui),
+            Tab::Patches => self.ui_patches(ui),
+            _ => self.ui_controls(ui),
         }
+    }
+
+    fn ui_play(&mut self, ui: &mut egui::Ui) {
+        // Logo already sits top-center on the stage — keep Play content sparse.
+        ui.add_space(40.0);
+        theme::teal_pane(ui, |ui| {
+            ui.set_min_width(ui.available_width().min(520.0));
+            ui.vertical_centered(|ui| {
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new("SINGLE PLAYER")
+                        .size(18.0)
+                        .color(theme::amber())
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new("Launch the campaign. Build your empire.")
+                        .color(theme::muted()),
+                );
+                ui.add_space(20.0);
+                let enabled = self.checklist.kingpin_exe == ItemStatus::Ok && !self.busy;
+                if theme::join_button(ui, "LAUNCH", enabled).clicked() {
+                    if let Some(dir) = self.config.game_dir() {
+                        match actions::launch_single_player(&dir) {
+                            Ok(()) => self.set_ok("Started kingpin.exe"),
+                            Err(e) => {
+                                self.set_err(e);
+                                self.select_tab(Tab::Patches);
+                            }
+                        }
+                    } else {
+                        self.set_err("No game folder — open Patches.");
+                        self.select_tab(Tab::Patches);
+                    }
+                }
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    self.play_status_chip(
+                        ui,
+                        "GAME",
+                        if self.checklist.kingpin_exe == ItemStatus::Ok {
+                            "READY"
+                        } else {
+                            "MISSING"
+                        },
+                        self.checklist.kingpin_exe == ItemStatus::Ok,
+                    );
+                    ui.add_space(12.0);
+                    self.play_status_chip(
+                        ui,
+                        "PATCH",
+                        if self.checklist.is_ready() {
+                            "OK"
+                        } else {
+                            "SETUP"
+                        },
+                        self.checklist.is_ready(),
+                    );
+                });
+                ui.add_space(12.0);
+            });
+        });
+    }
+
+    fn play_status_chip(&self, ui: &mut egui::Ui, title: &str, value: &str, ok: bool) {
+        egui::Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(10, 14, 18, 200))
+            .stroke(egui::Stroke::new(1.0_f32, theme::teal_dim()))
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.label(RichText::new(title).color(theme::muted()).size(11.0).strong());
+                ui.label(
+                    RichText::new(value)
+                        .color(if ok {
+                            theme::ready_green()
+                        } else {
+                            theme::amber()
+                        })
+                        .strong(),
+                );
+            });
     }
 
     /// Kick off a background mirror fetch + UDP status sweep (no-op if one is already running).
@@ -848,83 +1008,10 @@ impl KingpinLauncherApp {
     }
 
     fn ui_browser(&mut self, ui: &mut egui::Ui) {
-        let stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 58, 46));
-        let mut do_join = false;
-        let mut do_update = false;
-
-        // Title + actions
-        egui::Frame::NONE
-            .fill(theme::ase_panel())
-            .stroke(stroke)
-            .inner_margin(egui::Margin::symmetric(8, 6))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Server browser")
-                            .strong()
-                            .size(18.0)
-                            .color(theme::yellow()),
-                    );
-                    if self.busy {
-                        ui.spinner();
-                        ui.label(RichText::new("Updating…").color(theme::yellow()));
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let can_join = self.checklist.kingpin_exe == ItemStatus::Ok
-                            && self
-                                .selected_address
-                                .as_ref()
-                                .and_then(|a| self.servers.iter().find(|s| &s.address == a))
-                                .is_some_and(|s| s.online)
-                            && !self.busy;
-                        if ui
-                            .add_enabled(
-                                can_join,
-                                egui::Button::new(RichText::new("Join server").strong())
-                                    .fill(theme::blood()),
-                            )
-                            .on_hover_text("Double-click a row to join")
-                            .clicked()
-                        {
-                            do_join = true;
-                        }
-                        if ui
-                            .add_enabled(!self.busy, egui::Button::new("Update"))
-                            .clicked()
-                        {
-                            do_update = true;
-                        }
-                        ui.hyperlink_to("Web list", servers::SERVERS_PAGE_URL);
-                        ui.checkbox(&mut self.auto_refresh, "Auto");
-                    });
-                });
-
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Filter").color(theme::yellow()));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.server_search)
-                            .desired_width(200.0)
-                            .hint_text("name / map / game / ip"),
-                    );
-                    ui.separator();
-                    ui.selectable_value(&mut self.server_filter, BrowserFilter::Kingpin, "Kingpin");
-                    ui.selectable_value(&mut self.server_filter, BrowserFilter::All, "All");
-                    ui.separator();
-                    ui.checkbox(&mut self.online_only, "Hide offline");
-                    ui.checkbox(&mut self.hide_empty, "Hide empty");
-                    ui.checkbox(&mut self.hide_full, "Hide full");
-                });
-            });
-
-        if do_update {
+        // F5 refreshes; right-click the teal pane for filters (no visible chrome).
+        if ui.input(|i| i.key_pressed(egui::Key::F5)) && !self.busy {
             self.start_server_refresh();
         }
-        if do_join {
-            self.join_selected();
-        }
-
-        ui.add_space(4.0);
 
         let list: Vec<GameServer> = self
             .filtered_sorted_servers()
@@ -935,134 +1022,125 @@ impl KingpinLauncherApp {
         let online_n = list.iter().filter(|s| s.online).count();
         let players_n: u32 = list.iter().map(|s| s.players).sum();
 
-        let available = ui.available_height();
-        let status_h = 28.0;
-        let detail_h = (available * 0.32).clamp(160.0, 280.0);
-        let list_h = (available - detail_h - status_h - 8.0).max(160.0);
-        let row_h = 28.0;
-
+        // Leave room so JOIN can sit on the pane's bottom-right corner (mockup overlap).
+        let list_h = (ui.available_height() - 36.0).max(220.0);
+        let row_h = 30.0;
         let mut join_addr: Option<String> = None;
         let mut select_addr: Option<String> = None;
         let mut sort_click: Option<SortCol> = None;
 
-        // Server list (ASE main pane)
-        egui::Frame::NONE
-            .fill(theme::ase_panel())
-            .stroke(stroke)
-            .inner_margin(egui::Margin::symmetric(4, 4))
-            .show(ui, |ui| {
-                ui.allocate_ui(egui::vec2(ui.available_width(), list_h), |ui| {
-                    let table = TableBuilder::new(ui)
-                        .striped(true)
-                        .resizable(true)
-                        .sense(egui::Sense::click())
-                        .cell_layout(Layout::left_to_right(Align::Center))
-                        .column(Column::exact(56.0)) // Ping
-                        .column(Column::exact(70.0)) // Players
-                        .column(Column::remainder().at_least(180.0)) // Server
-                        .column(Column::initial(140.0).at_least(90.0).clip(true)) // Map
-                        .column(Column::initial(130.0).at_least(80.0).clip(true)) // Game
-                        .column(Column::initial(160.0).at_least(120.0).clip(true)) // IP
-                        .min_scrolled_height(list_h - 32.0)
-                        .max_scroll_height(list_h - 32.0);
-
-                    table
-                        .header(26.0, |mut header| {
-                            for (col, label) in [
-                                (SortCol::Ping, "Ping"),
-                                (SortCol::Players, "Players"),
-                                (SortCol::Name, "Server Name"),
-                                (SortCol::Map, "Map"),
-                                (SortCol::Game, "Game"),
-                                (SortCol::Address, "IP Address"),
-                            ] {
-                                header.col(|ui| {
-                                    let mark = if self.sort_col == col {
-                                        if self.sort_asc {
-                                            " ▲"
-                                        } else {
-                                            " ▼"
-                                        }
-                                    } else {
-                                        ""
-                                    };
-                                    if ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(format!("{label}{mark}"))
-                                                    .strong()
-                                                    .color(theme::yellow()),
-                                            )
-                                            .sense(egui::Sense::click()),
-                                        )
-                                        .clicked()
-                                    {
-                                        sort_click = Some(col);
-                                    }
-                                });
-                            }
-                        })
-                        .body(|mut body| {
-                            for server in &list {
-                                let selected =
-                                    self.selected_address.as_deref() == Some(&server.address);
-                                let ping_color =
-                                    theme::ase_ping_color(server.online, server.ping_ms);
-                                let addr = server.address.clone();
-
-                                body.row(row_h, |mut row| {
-                                    // Full-row highlight (not per-cell selectable_label bars).
-                                    row.set_selected(selected);
-                                    let name_color = if selected {
-                                        theme::yellow()
-                                    } else if server.online {
-                                        Color32::from_rgb(230, 220, 200)
-                                    } else {
-                                        Color32::from_rgb(120, 110, 95)
-                                    };
-
-                                    row.col(|ui| {
-                                        ui.label(
-                                            RichText::new(server.ping_label())
-                                                .monospace()
-                                                .color(ping_color),
-                                        );
-                                    });
-                                    row.col(|ui| {
-                                        ui.label(
-                                            RichText::new(server.players_label()).monospace(),
-                                        );
-                                    });
-                                    row.col(|ui| {
-                                        ui.label(RichText::new(&server.name).color(name_color));
-                                    });
-                                    row.col(|ui| {
-                                        ui.label(&server.map);
-                                    });
-                                    row.col(|ui| {
-                                        let game = server.game_label();
-                                        ui.label(if game.is_empty() { "—" } else { game });
-                                    });
-                                    row.col(|ui| {
-                                        ui.label(
-                                            RichText::new(&server.address)
-                                                .monospace()
-                                                .color(Color32::from_rgb(140, 130, 115)),
-                                        );
-                                    });
-
-                                    let resp = row.response();
-                                    if resp.clicked() {
-                                        select_addr = Some(addr.clone());
-                                    }
-                                    if resp.double_clicked() {
-                                        join_addr = Some(addr);
-                                    }
-                                });
+        let pane = theme::teal_pane(ui, |ui| {
+            ui.set_min_height(list_h);
+            let teal = theme::teal();
+            TableBuilder::new(ui)
+                .striped(false)
+                .sense(egui::Sense::click())
+                .cell_layout(Layout::left_to_right(Align::Center))
+                .column(Column::remainder().at_least(180.0))
+                .column(Column::exact(70.0))
+                .column(Column::exact(80.0))
+                .column(Column::initial(140.0).at_least(90.0).clip(true))
+                .min_scrolled_height(list_h - 28.0)
+                .max_scroll_height(list_h - 28.0)
+                .header(28.0, |mut header| {
+                    for (label, col) in [
+                        ("NAME", SortCol::Name),
+                        ("PING", SortCol::Ping),
+                        ("PLAYERS", SortCol::Players),
+                        ("MAP", SortCol::Map),
+                    ] {
+                        header.col(|ui| {
+                            let mark = if self.sort_col == col {
+                                if self.sort_asc {
+                                    " ▲"
+                                } else {
+                                    " ▼"
+                                }
+                            } else {
+                                ""
+                            };
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(format!("{label}{mark}"))
+                                            .strong()
+                                            .size(15.0)
+                                            .color(Color32::from_rgb(90, 235, 225)),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                sort_click = Some(col);
                             }
                         });
+                    }
+                })
+                .body(|mut body| {
+                    for server in &list {
+                        let selected =
+                            self.selected_address.as_deref() == Some(&server.address);
+                        let ping_color =
+                            theme::ase_ping_color(server.online, server.ping_ms);
+                        let addr = server.address.clone();
+                        let name_color = if selected {
+                            theme::amber()
+                        } else if server.online {
+                            teal
+                        } else {
+                            theme::muted()
+                        };
+
+                        body.row(row_h, |mut row| {
+                            row.set_selected(selected);
+                            row.col(|ui| {
+                                ui.label(RichText::new(&server.name).color(name_color));
+                            });
+                            row.col(|ui| {
+                                ui.label(
+                                    RichText::new(server.ping_label())
+                                        .monospace()
+                                        .color(ping_color),
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.label(
+                                    RichText::new(server.players_label())
+                                        .monospace()
+                                        .color(teal),
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.label(
+                                    RichText::new(if server.map.is_empty() {
+                                        "—"
+                                    } else {
+                                        server.map.as_str()
+                                    })
+                                    .color(teal),
+                                );
+                            });
+                            let resp = row.response();
+                            if resp.clicked() {
+                                select_addr = Some(addr.clone());
+                            }
+                            if resp.double_clicked() {
+                                join_addr = Some(addr);
+                            }
+                        });
+                    }
                 });
-            });
+        });
+        pane.context_menu(|ui| {
+            ui.label(RichText::new("FILTERS").color(theme::amber()).strong());
+            ui.add(egui::TextEdit::singleline(&mut self.server_search).hint_text("search"));
+            ui.checkbox(&mut self.online_only, "Online only");
+            ui.checkbox(&mut self.auto_refresh, "Auto refresh");
+            if ui.button("Refresh (F5)").clicked() {
+                self.start_server_refresh();
+                ui.close_menu();
+            }
+        });
 
         if let Some(col) = sort_click {
             self.toggle_sort(col);
@@ -1075,195 +1153,25 @@ impl KingpinLauncherApp {
             self.join_selected();
         }
 
-        ui.add_space(4.0);
-
-        // ASE bottom: Player List | Server Info
-        let selected = self
-            .selected_address
-            .as_ref()
-            .and_then(|a| list.iter().find(|s| &s.address == a).cloned())
-            .or_else(|| {
-                self.selected_address
-                    .as_ref()
-                    .and_then(|a| self.servers.iter().find(|s| &s.address == a).cloned())
-            });
-
-        ui.allocate_ui(egui::vec2(ui.available_width(), detail_h), |ui| {
-            ui.columns(2, |cols| {
-                egui::Frame::NONE
-                    .fill(theme::ase_panel())
-                    .stroke(stroke)
-                    .inner_margin(egui::Margin::symmetric(6, 4))
-                    .show(&mut cols[0], |ui| {
-                        ui.label(
-                            RichText::new("PLAYER LIST")
-                                .strong()
-                                .color(theme::yellow()),
-                        );
-                        ui.separator();
-                        egui::ScrollArea::vertical()
-                            .id_salt("ase_players")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                match &selected {
-                                    Some(server) if !server.player_rows.is_empty() => {
-                                        egui::Grid::new("ase_players_grid")
-                                            .num_columns(3)
-                                            .striped(true)
-                                            .spacing([10.0, 2.0])
-                                            .show(ui, |ui| {
-                                                ui.label(
-                                                    RichText::new("Score")
-                                                        .strong()
-                                                        .color(Color32::from_rgb(160, 150, 130)),
-                                                );
-                                                ui.label(
-                                                    RichText::new("Ping")
-                                                        .strong()
-                                                        .color(Color32::from_rgb(160, 150, 130)),
-                                                );
-                                                ui.label(
-                                                    RichText::new("Name")
-                                                        .strong()
-                                                        .color(Color32::from_rgb(160, 150, 130)),
-                                                );
-                                                ui.end_row();
-                                                for p in &server.player_rows {
-                                                    ui.label(
-                                                        RichText::new(p.score.to_string())
-                                                            .monospace(),
-                                                    );
-                                                    ui.label(
-                                                        RichText::new(p.ping.to_string())
-                                                            .monospace(),
-                                                    );
-                                                    ui.label(&p.name);
-                                                    ui.end_row();
-                                                }
-                                            });
-                                    }
-                                    Some(server) if server.online => {
-                                        ui.label(
-                                            RichText::new("No player names in status response.")
-                                                .color(Color32::from_rgb(140, 128, 110)),
-                                        );
-                                    }
-                                    Some(_) => {
-                                        ui.label(
-                                            RichText::new("Server not responding.")
-                                                .color(theme::blood()),
-                                        );
-                                    }
-                                    None => {
-                                        ui.label(
-                                            RichText::new("Select a server.")
-                                                .color(Color32::from_rgb(140, 128, 110)),
-                                        );
-                                    }
-                                }
-                            });
-                    });
-
-                egui::Frame::NONE
-                    .fill(theme::ase_panel())
-                    .stroke(stroke)
-                    .inner_margin(egui::Margin::symmetric(6, 4))
-                    .show(&mut cols[1], |ui| {
-                        ui.label(
-                            RichText::new("SERVER INFO")
-                                .strong()
-                                .color(theme::yellow()),
-                        );
-                        ui.separator();
-                        egui::ScrollArea::vertical()
-                            .id_salt("ase_rules")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                match &selected {
-                                    Some(server) => {
-                                        ui.label(
-                                            RichText::new(&server.name)
-                                                .strong()
-                                                .color(theme::yellow()),
-                                        );
-                                        ui.label(
-                                            RichText::new(&server.address)
-                                                .monospace()
-                                                .color(Color32::from_rgb(140, 130, 115)),
-                                        );
-                                        ui.label(format!(
-                                            "Map: {}   Game: {}",
-                                            if server.map.is_empty() {
-                                                "—"
-                                            } else {
-                                                &server.map
-                                            },
-                                            {
-                                                let g = server.game_label();
-                                                if g.is_empty() {
-                                                    "—"
-                                                } else {
-                                                    g
-                                                }
-                                            },
-                                        ));
-                                        ui.add_space(4.0);
-                                        if server.rules.is_empty() {
-                                            ui.label(
-                                                RichText::new("(no cvars)")
-                                                    .color(Color32::from_rgb(140, 128, 110)),
-                                            );
-                                        } else {
-                                            egui::Grid::new("ase_rules_grid")
-                                                .num_columns(2)
-                                                .striped(true)
-                                                .spacing([8.0, 2.0])
-                                                .show(ui, |ui| {
-                                                    for (k, v) in &server.rules {
-                                                        ui.label(
-                                                            RichText::new(k).color(
-                                                                Color32::from_rgb(160, 150, 130),
-                                                            ),
-                                                        );
-                                                        ui.label(v);
-                                                        ui.end_row();
-                                                    }
-                                                });
-                                        }
-                                    }
-                                    None => {
-                                        ui.label(
-                                            RichText::new("Select a server.")
-                                                .color(Color32::from_rgb(140, 128, 110)),
-                                        );
-                                    }
-                                }
-                            });
-                    });
-            });
-        });
-
-        // Status strip
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!(
-                    "{shown} servers  ·  {online_n} online  ·  {players_n} players"
-                ))
-                .color(Color32::from_rgb(160, 150, 130)),
-            );
-            if self.servers_loaded && shown == 0 && !self.busy {
-                ui.label(
-                    RichText::new("— no matches (clear filter / show offline)")
-                        .color(theme::yellow()),
-                );
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("M-Browser").clicked() {
-                    self.launch_mbrowser();
-                }
-            });
-        });
+        // JOIN overlaps the teal pane's bottom-right corner (mockup) — painted in update().
+        let pane_r = pane.rect;
+        let join_size = egui::vec2(230.0, 68.0);
+        let join_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                pane_r.right() - join_size.x + 12.0,
+                pane_r.bottom() - join_size.y * 0.55,
+            ),
+            join_size,
+        );
+        let can_join = self.checklist.kingpin_exe == ItemStatus::Ok
+            && self
+                .selected_address
+                .as_ref()
+                .and_then(|a| self.servers.iter().find(|s| &s.address == a))
+                .is_some_and(|s| s.online)
+            && !self.busy;
+        self.join_cta = Some((join_rect, can_join));
+        let _ = (shown, online_n, players_n);
     }
 
     /// `+connect` the highlighted Browser row (with `+set game` when a mod folder is required).
@@ -1483,6 +1391,442 @@ impl KingpinLauncherApp {
                 RichText::new("Set the Kingpin folder under Patches before installing mods.")
                     .color(theme::yellow()),
             );
+        }
+    }
+
+    fn ui_player(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("PLAYER")
+                .size(22.0)
+                .color(theme::amber())
+                .strong(),
+        );
+        ui.label(
+            RichText::new(
+                "Name, skin, extras → autoexec.cfg so Player Setup sticks every launch.",
+            )
+            .color(theme::muted()),
+        );
+        ui.add_space(8.0);
+
+        if self.config.game_dir().is_none() {
+            ui.label(
+                RichText::new("Set the Kingpin folder under Patches first.")
+                    .color(theme::yellow()),
+            );
+            return;
+        }
+
+        self.ensure_controls_loaded();
+        self.ensure_player_models();
+
+        let games = self
+            .config
+            .game_dir()
+            .map(|d| autoexec::list_mod_dirs(&d))
+            .unwrap_or_default();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Game:");
+            egui::ComboBox::from_id_salt("player_game")
+                .selected_text(&self.controls_game)
+                .show_ui(ui, |ui| {
+                    for g in &games {
+                        if ui
+                            .selectable_label(self.controls_game == *g, g)
+                            .clicked()
+                        {
+                            if self.controls_dirty {
+                                self.set_err("Save or reload before switching game folders.");
+                            } else {
+                                self.controls_game = g.clone();
+                                self.load_controls();
+                                self.player_models.clear();
+                                self.sync_player_from_autoexec();
+                            }
+                        }
+                    }
+                });
+
+            if ui.button("Reload").clicked() {
+                self.load_controls();
+                self.sync_player_from_autoexec();
+                self.set_ok("Reloaded autoexec.cfg");
+            }
+            if ui
+                .add_enabled(self.controls_dirty, egui::Button::new("Save"))
+                .clicked()
+            {
+                self.apply_player_to_autoexec();
+                self.save_controls();
+            }
+            if ui
+                .button("Apply to all mods")
+                .on_hover_text(
+                    "Merges name/skin/extras/gender (and shared controls cvars) into every mod autoexec.",
+                )
+                .clicked()
+            {
+                self.apply_player_to_autoexec();
+                self.apply_controls_to_all_mods();
+            }
+        });
+
+        if self.controls_dirty {
+            ui.label(
+                RichText::new("Unsaved changes")
+                    .color(theme::yellow())
+                    .small(),
+            );
+        }
+
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.player_name)
+                        .desired_width(180.0)
+                        .char_limit(32),
+                )
+                .changed()
+            {
+                self.apply_player_to_autoexec();
+            }
+            ui.label("Gender:");
+            egui::ComboBox::from_id_salt("player_gender")
+                .selected_text(&self.player_gender)
+                .show_ui(ui, |ui| {
+                    for g in ["male", "female"] {
+                        if ui
+                            .selectable_label(self.player_gender == g, g)
+                            .clicked()
+                        {
+                            self.player_gender = g.into();
+                            self.apply_player_to_autoexec();
+                        }
+                    }
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Extras:");
+            let mut hat = self.player_extras.chars().next().unwrap_or('0');
+            let mut cigar = self.player_extras.chars().nth(1).unwrap_or('0');
+            let hat_label = match hat {
+                '1' => "cap",
+                '2' => "fedora",
+                '3' => "stetson",
+                _ => "none",
+            };
+            let mut hat_changed = false;
+            egui::ComboBox::from_id_salt("player_hat")
+                .selected_text(hat_label)
+                .show_ui(ui, |ui| {
+                    for (ch, label) in [('0', "none"), ('1', "cap"), ('2', "fedora"), ('3', "stetson")]
+                    {
+                        if ui.selectable_label(hat == ch, label).clicked() {
+                            hat = ch;
+                            hat_changed = true;
+                        }
+                    }
+                });
+            ui.label("Cigar:");
+            let mut cigar_changed = false;
+            egui::ComboBox::from_id_salt("player_cigar")
+                .selected_text(if cigar == '1' { "on" } else { "off" })
+                .show_ui(ui, |ui| {
+                    for (ch, label) in [('0', "off"), ('1', "on")] {
+                        if ui.selectable_label(cigar == ch, label).clicked() {
+                            cigar = ch;
+                            cigar_changed = true;
+                        }
+                    }
+                });
+            if hat_changed || cigar_changed {
+                self.player_extras = format!("{hat}{cigar}00");
+                self.apply_player_to_autoexec();
+            }
+            ui.label(
+                RichText::new(format!("→ {}", self.player_extras))
+                    .small()
+                    .monospace()
+                    .color(Color32::from_rgb(160, 150, 130)),
+            );
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.player_model_filter)
+                    .desired_width(160.0)
+                    .hint_text("model name…"),
+            );
+            ui.label("Model:");
+            let filter = self.player_model_filter.to_ascii_lowercase();
+            let filtered: Vec<String> = self
+                .player_models
+                .iter()
+                .filter(|m| filter.is_empty() || m.to_ascii_lowercase().contains(&filter))
+                .cloned()
+                .collect();
+            let current_model = self.player_sel.model.clone();
+            let mut picked_model: Option<String> = None;
+            egui::ComboBox::from_id_salt("player_model")
+                .selected_text(&current_model)
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for m in &filtered {
+                        if ui
+                            .selectable_label(current_model == *m, m)
+                            .clicked()
+                        {
+                            picked_model = Some(m.clone());
+                        }
+                    }
+                });
+            if let Some(m) = picked_model {
+                self.set_player_model(m);
+            }
+            ui.label(
+                RichText::new(format!("{} models", self.player_models.len()))
+                    .small()
+                    .color(Color32::from_rgb(160, 150, 130)),
+            );
+        });
+
+        let Some(dir) = self.config.game_dir() else {
+            return;
+        };
+        let dirs = skins::resolve_dirs(&dir, &self.controls_game, &self.player_sel.model);
+        let (heads, bodies, legs) = if let Some(ref d) = dirs {
+            (
+                skins::list_skin_ids(d, "head"),
+                skins::list_skin_ids(d, "body"),
+                skins::list_skin_ids(d, "legs"),
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+
+        ui.horizontal(|ui| {
+            self.skin_id_combo(ui, "Head", "player_head", &heads, 0);
+            self.skin_id_combo(ui, "Body", "player_body", &bodies, 1);
+            self.skin_id_combo(ui, "Legs", "player_legs", &legs, 2);
+        });
+
+        ui.label(
+            RichText::new(format!("skin \"{}\"", self.player_sel.to_cvar()))
+                .monospace()
+                .small()
+                .color(Color32::from_rgb(160, 150, 130)),
+        );
+
+        ui.add_space(10.0);
+        ui.label(RichText::new("PREVIEW").color(theme::teal()).strong());
+        ui.add_space(4.0);
+
+        let preview_parts = [
+            ("head", self.player_sel.head.clone()),
+            ("body", self.player_sel.body.clone()),
+            ("legs", self.player_sel.legs.clone()),
+        ];
+        ui.horizontal(|ui| {
+            for (part, id) in &preview_parts {
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(10, 14, 18, 220))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::teal_dim()))
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new(part.to_ascii_uppercase())
+                                    .small()
+                                    .strong()
+                                    .color(theme::amber()),
+                            );
+                            let path = dirs
+                                .as_ref()
+                                .and_then(|d| skins::texture_path(d, part, id));
+                            match path {
+                                Some(path) => {
+                                    let key = path.to_string_lossy().to_string();
+                                    self.ensure_preview_tex(ui.ctx(), &key, &path);
+                                    if let Some(tex) = self.player_tex.get(&key) {
+                                        let max_w = 180.0;
+                                        let size = tex.size_vec2();
+                                        let scale = (max_w / size.x).min(1.0);
+                                        ui.add(
+                                            egui::Image::new(tex)
+                                                .fit_to_exact_size(size * scale)
+                                                .bg_fill(Color32::from_rgb(8, 10, 12)),
+                                        );
+                                    } else if let Some(err) = self.player_tex_error.get(&key) {
+                                        ui.label(
+                                            RichText::new(err).small().color(theme::blood()),
+                                        );
+                                    }
+                                }
+                                None => {
+                                    ui.label(
+                                        RichText::new(format!("no {part}_{id}.tga"))
+                                            .small()
+                                            .color(theme::muted()),
+                                    );
+                                }
+                            }
+                        });
+                    });
+                ui.add_space(12.0);
+            }
+        });
+    }
+
+    fn skin_id_combo(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        id_salt: &str,
+        options: &[String],
+        which: u8,
+    ) {
+        ui.label(format!("{label}:"));
+        let current = match which {
+            0 => self.player_sel.head.clone(),
+            1 => self.player_sel.body.clone(),
+            _ => self.player_sel.legs.clone(),
+        };
+        let mut changed_to: Option<String> = None;
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(&current)
+            .width(100.0)
+            .show_ui(ui, |ui| {
+                if options.is_empty() {
+                    ui.label("(none found)");
+                    return;
+                }
+                for opt in options {
+                    if ui.selectable_label(current == *opt, opt).clicked() {
+                        changed_to = Some(opt.clone());
+                    }
+                }
+            });
+        if let Some(v) = changed_to {
+            match which {
+                0 => self.player_sel.head = v,
+                1 => self.player_sel.body = v,
+                _ => self.player_sel.legs = v,
+            }
+            self.apply_player_to_autoexec();
+        }
+    }
+
+    fn ensure_player_models(&mut self) {
+        let Some(dir) = self.config.game_dir() else {
+            return;
+        };
+        if !self.player_models.is_empty() {
+            return;
+        }
+        self.player_models = skins::list_models(&dir, &self.controls_game);
+        if self.player_models.is_empty() {
+            return;
+        }
+        if !self
+            .player_models
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(&self.player_sel.model))
+        {
+            if let Some(first) = self.player_models.first().cloned() {
+                self.set_player_model(first);
+            }
+        }
+    }
+
+    fn set_player_model(&mut self, model: String) {
+        let Some(dir) = self.config.game_dir() else {
+            self.player_sel.model = model;
+            return;
+        };
+        if let Some(sel) = skins::default_selection(&dir, &self.controls_game, &model) {
+            self.player_sel = sel;
+        } else {
+            self.player_sel.model = model;
+        }
+        if self.player_sel.model.to_ascii_lowercase().starts_with("female") {
+            self.player_gender = "female".into();
+        } else if self.player_sel.model.to_ascii_lowercase().starts_with("male") {
+            self.player_gender = "male".into();
+        }
+        self.apply_player_to_autoexec();
+    }
+
+    fn sync_player_from_autoexec(&mut self) {
+        let Some(dir) = self.config.game_dir() else {
+            return;
+        };
+        self.player_models = skins::list_models(&dir, &self.controls_game);
+
+        if let Some(name) = autoexec::get_cvar(&self.controls_text, "name") {
+            self.player_name = name;
+        }
+        if let Some(extras) = autoexec::get_cvar(&self.controls_text, "extras") {
+            let mut e = extras;
+            while e.len() < 4 {
+                e.push('0');
+            }
+            self.player_extras = e.chars().take(4).collect();
+        }
+        if let Some(gender) = autoexec::get_cvar(&self.controls_text, "gender") {
+            self.player_gender = gender.to_ascii_lowercase();
+        }
+
+        if let Some(raw) = autoexec::get_cvar(&self.controls_text, "skin") {
+            if let Some(sel) = SkinSelection::parse(&raw) {
+                self.player_sel = sel;
+                return;
+            }
+        }
+        // Fallback: first installed model
+        if let Some(model) = self.player_models.first().cloned() {
+            if let Some(sel) = skins::default_selection(&dir, &self.controls_game, &model) {
+                self.player_sel = sel;
+            }
+        }
+    }
+
+    fn apply_player_to_autoexec(&mut self) {
+        let skin = self.player_sel.to_cvar();
+        self.controls_text = autoexec::set_cvar(&self.controls_text, "name", &self.player_name);
+        self.controls_text = autoexec::set_cvar(&self.controls_text, "skin", &skin);
+        self.controls_text = autoexec::set_cvar(&self.controls_text, "extras", &self.player_extras);
+        self.controls_text =
+            autoexec::set_cvar(&self.controls_text, "gender", &self.player_gender);
+        self.controls_text = autoexec::set_cvar(&self.controls_text, "gender_auto", "1");
+        self.controls_dirty = true;
+    }
+
+    fn ensure_preview_tex(&mut self, ctx: &egui::Context, key: &str, path: &std::path::Path) {
+        if self.player_tex.contains_key(key) || self.player_tex_error.contains_key(key) {
+            return;
+        }
+        match skins::load_preview_image(path, 256) {
+            Ok(color) => {
+                let tex = ctx.load_texture(
+                    format!("skin-{}", key),
+                    color,
+                    egui::TextureOptions::LINEAR,
+                );
+                self.player_tex.insert(key.to_string(), tex);
+            }
+            Err(e) => {
+                self.player_tex_error.insert(key.to_string(), e);
+            }
         }
     }
 

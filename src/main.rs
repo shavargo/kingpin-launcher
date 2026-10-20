@@ -19,6 +19,7 @@ mod detect;
 mod mods;
 mod query;
 mod servers;
+mod skins;
 mod theme;
 mod ui;
 mod wizard;
@@ -26,12 +27,12 @@ mod wizard;
 use eframe::egui;
 use ui::KingpinLauncherApp;
 
-/// Soft floor so nav + server columns stay usable.
-pub const WIN_MIN: [f32; 2] = [1100.0, 620.0];
-/// Soft ceiling — large enough for ASE-style tables without covering the desktop.
-pub const WIN_MAX: [f32; 2] = [1440.0, 900.0];
-/// First-open size (start at the max so the Browser table is readable).
-pub const WIN_DEFAULT: [f32; 2] = WIN_MAX;
+/// Soft floor — 16:9 cinematic stage.
+pub const WIN_MIN: [f32; 2] = [1024.0, 576.0];
+/// Soft ceiling.
+pub const WIN_MAX: [f32; 2] = [1600.0, 900.0];
+/// Default matches mockup aspect (16:9).
+pub const WIN_DEFAULT: [f32; 2] = [1280.0, 720.0];
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -39,8 +40,10 @@ fn main() -> eframe::Result<()> {
             .with_inner_size(WIN_DEFAULT)
             .with_min_inner_size(WIN_MIN)
             .with_max_inner_size(WIN_MAX)
-            // Maximize ignores max_inner_size on Windows; hide the button instead.
+            // Mockup is a borderless stage — no Windows title chrome.
+            .with_decorations(false)
             .with_maximize_button(false)
+            .with_taskbar(true)
             .with_title("Kingpin Launcher")
             .with_icon(load_app_icon()),
         ..Default::default()
