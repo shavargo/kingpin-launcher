@@ -1,0 +1,22 @@
+/target/
+**/*.rs.bk
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+.env
+.env.*
+!.env.example
+
+# Local launcher state (written next to the exe)
+launcher.toml
+cache/
+
+# Cloudflare / Wrangler local state (never publish — may contain account ids)
+.wrangler/
+
+# OS / editor junk
+*.pdb
+*.ilk
+*.exp

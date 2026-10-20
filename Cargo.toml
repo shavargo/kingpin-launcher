@@ -1,0 +1,27 @@
+[package]
+name = "kingpin-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "Noir GUI launcher for Kingpin: Life of Crime"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.31", default-features = true, features = ["default_fonts"] }
+egui = "0.31"
+egui_extras = { version = "0.31", default-features = false, features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ureq = { version = "2", features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+open = "5"
+rfd = "0.15"
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
