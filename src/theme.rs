@@ -47,10 +47,11 @@ pub fn apply(ctx: &egui::Context) {
 
     let mut style = Style::default();
     let mut visuals = Visuals::dark();
-    visuals.window_fill = ASPHALT;
+    visuals.window_fill = Color32::TRANSPARENT;
     visuals.panel_fill = Color32::TRANSPARENT;
-    visuals.extreme_bg_color = ASPHALT;
-    visuals.faint_bg_color = Color32::from_rgba_unmultiplied(8, 10, 12, 100);
+    // Scroll/table extremes must stay glass — opaque asphalt here kills alley bleed-through.
+    visuals.extreme_bg_color = Color32::from_rgba_unmultiplied(0, 20, 24, 40);
+    visuals.faint_bg_color = Color32::from_rgba_unmultiplied(0, 30, 34, 35);
     visuals.override_text_color = Some(TEXT);
     for w in [
         &mut visuals.widgets.noninteractive,
@@ -63,18 +64,19 @@ pub fn apply(ctx: &egui::Context) {
     }
     visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, MUTED);
-    visuals.widgets.inactive.bg_fill = Color32::from_rgba_unmultiplied(14, 12, 10, 160);
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(70, 60, 50));
+    // Keep widget fills glassy so the alley reads through the server table.
+    visuals.widgets.inactive.bg_fill = Color32::from_rgba_unmultiplied(8, 14, 16, 40);
+    visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgba_unmultiplied(28, 24, 18, 180);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgba_unmultiplied(255, 176, 48, 28);
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, AMBER);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, AMBER);
-    visuals.widgets.active.bg_fill = BLOOD;
+    visuals.widgets.active.bg_fill = Color32::from_rgba_unmultiplied(140, 28, 24, 180);
     visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, BLOOD_HI);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, TEXT);
-    visuals.widgets.open.bg_fill = Color32::from_rgba_unmultiplied(6, 18, 20, 220);
+    visuals.widgets.open.bg_fill = Color32::from_rgba_unmultiplied(0, 28, 32, 60);
     visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, TEAL);
-    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(255, 176, 48, 35);
+    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(255, 176, 48, 40);
     visuals.selection.stroke = Stroke::new(1.0_f32, AMBER);
     visuals.hyperlink_color = AMBER;
     visuals.warn_fg_color = AMBER;
@@ -184,6 +186,14 @@ pub fn paint_backdrop(ctx: &egui::Context) {
 
 pub fn paint_logo(ui: &mut egui::Ui, rect: Rect) {
     let tex = logo_tex(ui.ctx());
+    // Soft drop shadow behind letterforms only (texture alpha already punched).
+    let shadow = rect.translate(egui::vec2(2.0, 3.0));
+    ui.painter().image(
+        tex.id(),
+        shadow,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+    );
     ui.painter().image(
         tex.id(),
         rect,
@@ -284,17 +294,18 @@ pub fn rivet_nav_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui:
 
 pub fn teal_pane(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     let r = ui.available_rect_before_wrap();
-    // Soft outer bloom onto wet alley (mockup cyan puddle glow) — keep light so cobbles read.
-    for (expand, a) in [(14.0_f32, 10u8), (8.0, 18), (3.0, 32)] {
-        ui.painter().rect_filled(
+    // Soft outer bloom onto wet alley — stroke glow only, not a filled slab.
+    for (expand, a) in [(10.0_f32, 40u8), (5.0, 70), (2.0, 120)] {
+        ui.painter().rect_stroke(
             r.expand(expand),
             6.0,
-            Color32::from_rgba_unmultiplied(48, 210, 200, a),
+            Stroke::new(3.0_f32, Color32::from_rgba_unmultiplied(48, 210, 200, a)),
+            egui::StrokeKind::Outside,
         );
     }
     egui::Frame::new()
-        // Glass teal — alley cobbles must show through (lower fill alpha than earlier builds).
-        .fill(Color32::from_rgba_unmultiplied(0, 55, 58, 48))
+        // Glass teal — cobbles must read through (mockup wash).
+        .fill(Color32::from_rgba_unmultiplied(0, 80, 78, 18))
         .stroke(Stroke::new(2.0_f32, TEAL))
         .corner_radius(CornerRadius::same(5))
         .inner_margin(Margin::symmetric(16, 12))
@@ -326,10 +337,11 @@ pub fn paint_join_plate(
     let use_baked = label.eq_ignore_ascii_case("JOIN");
     if use_baked {
         let tex = join_tex(painter.ctx());
+        // Keep the blood-red plate (mockup never washes to gray when idle/disabled).
         let tint = if !enabled {
-            Color32::from_rgba_unmultiplied(130, 110, 110, 170)
+            Color32::from_rgba_unmultiplied(210, 170, 170, 230)
         } else if hovered {
-            Color32::from_rgba_unmultiplied(255, 235, 225, 255)
+            Color32::from_rgba_unmultiplied(255, 240, 230, 255)
         } else {
             Color32::WHITE
         };

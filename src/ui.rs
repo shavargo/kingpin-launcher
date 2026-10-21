@@ -700,7 +700,7 @@ impl eframe::App for KingpinLauncherApp {
                             full.left() + nav_w + full.width() * 0.045,
                             full.top() + logo_h + 18.0,
                         ),
-                        egui::pos2(full.right() - full.width() * 0.04, full.bottom() - 10.0),
+                        egui::pos2(full.right() - full.width() * 0.045, full.bottom() - 8.0),
                     );
                     ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
                         ui.set_min_size(content_rect.size());
@@ -1026,10 +1026,11 @@ impl KingpinLauncherApp {
 
         // Reserve a bottom strip so JOIN can hang past the teal pane (mockup overlap)
         // without being clipped by the borderless window edge.
-        let join_size = egui::vec2(248.0, 86.0);
-        let join_overhang_y = 32.0_f32;
-        let join_overhang_x = 22.0_f32;
-        let list_h = (ui.available_height() - join_overhang_y - 4.0).max(220.0);
+        let join_size = egui::vec2(252.0, 88.0);
+        // Mockup: ~45% of the plate hangs past the pane's BR corner.
+        let join_overhang_y = 40.0_f32;
+        let join_overhang_x = 30.0_f32;
+        let list_h = (ui.available_height() - join_overhang_y - 6.0).max(220.0);
         let row_h = 30.0;
         let mut join_addr: Option<String> = None;
         let mut select_addr: Option<String> = None;
